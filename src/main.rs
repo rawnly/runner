@@ -11,6 +11,8 @@ use tokio::process::Command;
 #[derive(Debug, Clone, Parser)]
 struct Args {
     path: PathBuf,
+
+    command: Option<String>,
 }
 
 #[tokio::main]
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
     watcher.watch(&args.path, RecursiveMode::Recursive)?;
 
     // clear screen
-    print!("{}[2J", 27 as char);
+    print!("\x1B[2J\x1B[1;1H");
 
     println!(
         "Watching {} for changes...",
@@ -34,15 +36,19 @@ async fn main() -> anyhow::Result<()> {
             .to_str()
             .ok_or(anyhow!("unable to retrive path"))?
     );
+    println!();
 
-    run(file_type, &args.path).await?;
+    run(file_type, &args).await?;
 
     for res in rx {
         let event = &res?;
         let kind = event.kind;
 
         if let EventKind::Modify(ModifyKind::Data(DataChange::Content)) = kind {
-            run(file_type, &args.path).await?;
+            print!("\x1B[2J\x1B[1;1H");
+            println!("File changed...");
+            println!();
+            run(file_type, &args).await?;
         }
     }
 
@@ -53,8 +59,10 @@ async fn main() -> anyhow::Result<()> {
 enum FileType {
     Python,
     Node,
+    Unsupported,
 }
 
+// tryfrom
 impl TryFrom<&PathBuf> for FileType {
     type Error = anyhow::Error;
 
@@ -67,18 +75,27 @@ impl TryFrom<&PathBuf> for FileType {
         match ext {
             "py" => Ok(Self::Python),
             "js" | "mjs" => Ok(Self::Node),
-            _ => Err(anyhow!("Unsupported file type")),
+            _ => Ok(Self::Unsupported),
         }
     }
 }
 
-async fn run(file_type: FileType, path: &PathBuf) -> anyhow::Result<()> {
-    let command = match file_type {
-        FileType::Node => "node",
-        FileType::Python => "python3",
+async fn run(file_type: FileType, args: &Args) -> anyhow::Result<()> {
+    let command = match args.command.clone() {
+        Some(cmd) => cmd,
+        None => match file_type {
+            FileType::Node => "node",
+            FileType::Python => "python3",
+            _ => return Err(anyhow!("Unsupported file type")),
+        }
+        .to_string(),
     };
 
-    Command::new(command).arg(path).spawn()?.wait().await?;
+    Command::new(command)
+        .arg(&args.path)
+        .spawn()?
+        .wait()
+        .await?;
 
     Ok(())
 }
