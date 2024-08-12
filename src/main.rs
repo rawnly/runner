@@ -10,8 +10,11 @@ use tokio::process::Command;
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
+    /// path to the file to watch
     path: PathBuf,
 
+    /// command to run when the file changes -
+    /// if includes whitespace, it will be split and the first part will be the command
     command: Option<String>,
 }
 
@@ -30,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     print!("\x1B[2J\x1B[1;1H");
 
     println!(
-        "Watching {} for changes...",
+        "🏃 Watching {} for changes...",
         &args
             .path
             .to_str()
@@ -38,7 +41,7 @@ async fn main() -> anyhow::Result<()> {
     );
     println!();
 
-    run(file_type, &args).await?;
+    run(&file_type, &args).await?;
 
     for res in rx {
         let event = &res?;
@@ -48,21 +51,22 @@ async fn main() -> anyhow::Result<()> {
             print!("\x1B[2J\x1B[1;1H");
             println!("File changed...");
             println!();
-            run(file_type, &args).await?;
+            run(&file_type, &args).await?;
         }
     }
 
     Ok(())
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 enum FileType {
     Python,
     Node,
-    Unsupported,
+    Go,
+    Bun,
+    Unsupported(String),
 }
 
-// tryfrom
 impl TryFrom<&PathBuf> for FileType {
     type Error = anyhow::Error;
 
@@ -75,27 +79,81 @@ impl TryFrom<&PathBuf> for FileType {
         match ext {
             "py" => Ok(Self::Python),
             "js" | "mjs" => Ok(Self::Node),
-            _ => Ok(Self::Unsupported),
+            "go" => Ok(Self::Go),
+            "ts" => Ok(Self::Bun),
+            _ => Ok(Self::Unsupported(ext.to_string())),
         }
     }
 }
 
-async fn run(file_type: FileType, args: &Args) -> anyhow::Result<()> {
-    let command = match args.command.clone() {
-        Some(cmd) => cmd,
-        None => match file_type {
-            FileType::Node => "node",
-            FileType::Python => "python3",
-            _ => return Err(anyhow!("Unsupported file type")),
+impl ToString for FileType {
+    fn to_string(&self) -> String {
+        match self {
+            Self::Python => "python3",
+            Self::Node => "node",
+            Self::Go => "go",
+            Self::Bun => "bun",
+            Self::Unsupported(_) => "Unsupported",
         }
-        .to_string(),
-    };
+        .to_string()
+    }
+}
 
-    Command::new(command)
-        .arg(&args.path)
-        .spawn()?
-        .wait()
-        .await?;
+impl FileType {
+    async fn is_available(&self) -> Result<bool, anyhow::Error> {
+        match self {
+            Self::Unsupported(ext) => return Err(anyhow!("Unsupported file type: '.{}'", ext)),
+            _ => Ok(Command::new(self.to_string())
+                .arg("--version")
+                .output()
+                .await
+                .is_ok()),
+        }
+    }
+}
+
+async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<()> {
+    match args.command.clone() {
+        Some(c) => {
+            if c.contains(' ') {
+                let mut parts = c.split_whitespace();
+                let mut command = Command::new(parts.next().unwrap());
+
+                command.args(parts).arg(&args.path).spawn()?.wait().await?;
+            } else {
+                let mut command = Command::new(c);
+                command.arg(&args.path).spawn()?.wait().await?;
+            }
+        }
+        None => {
+            if !file_type.is_available().await? {
+                return Err(anyhow!(
+                    "cannot find the required command: '{}'",
+                    file_type.to_string()
+                ));
+            }
+
+            let mut command = match file_type {
+                FileType::Unsupported(ext) => {
+                    return Err(anyhow!("Unsupported file type: '.{}'", ext))
+                }
+                _ => Command::new(file_type.to_string()),
+            };
+
+            let arguments = match file_type {
+                FileType::Go => vec!["run"],
+                FileType::Bun => vec!["run"],
+                _ => vec![],
+            };
+
+            command
+                .args(arguments)
+                .arg(&args.path)
+                .spawn()?
+                .wait()
+                .await?;
+        }
+    }
 
     Ok(())
 }
