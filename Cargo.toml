@@ -8,6 +8,7 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.82"
 clap = { version = "4.5.4", features = ["derive"] }
+colored = "2.1.0"
 notify = { version = "6.1.1", features = ["serde"] }
 serde = { version = "1.0.198", features = ["derive"] }
 shellexpand = "3.1.0"
