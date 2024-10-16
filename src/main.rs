@@ -1,18 +1,21 @@
-use std::{env, path::PathBuf, sync::mpsc, time::Duration};
+use std::{env, path::PathBuf, process, time::Duration};
 
 use anyhow::anyhow;
 use clap::Parser;
 use colored::*;
 use notify::{
     event::{DataChange, ModifyKind},
-    EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+    Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
 };
-use tokio::process::Command;
+use tokio::{process::Command, select, sync::mpsc};
 
 #[derive(Debug, Clone, Parser)]
 struct Args {
     /// path to the file to watch
-    path: PathBuf,
+    path: Option<PathBuf>,
+
+    #[clap(long)]
+    extension: Option<String>,
 
     /// command to run when the file changes -
     /// if includes whitespace, it will be split and the first part will be the command
@@ -28,81 +31,107 @@ fn clear_screen() {
 
 const DURATION_ZERO: Duration = Duration::from_secs(0);
 
+async fn temp_file(ext: &str) -> anyhow::Result<PathBuf> {
+    let pid = process::id();
+
+    let mut path = env::temp_dir();
+    path.push(&format!("runner-{pid}.{ext}"));
+
+    tokio::fs::File::create(&path).await?;
+
+    Ok(path)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let mut last_run_duration = DURATION_ZERO;
 
-    let file_type = FileType::try_from(&args.path)?;
+    let ext = args.extension.unwrap_or("ts".to_string());
+    let path = args.path.clone().unwrap_or(temp_file(&ext).await?);
+    let is_temp = args.path.is_none();
 
-    let (tx, rx) = mpsc::channel();
-    let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())?;
+    let file_type = FileType::try_from(&path)?;
 
-    watcher.watch(&args.path, RecursiveMode::Recursive)?;
+    let (tx, mut rx) = mpsc::channel(10);
+    let mut watcher = RecommendedWatcher::new(
+        move |result: std::result::Result<Event, notify::Error>| {
+            tx.blocking_send(result).expect("failed to send event");
+        },
+        notify::Config::default(),
+    )?;
 
-    // clear screen
-    clear_screen();
+    watcher.watch(&path, RecursiveMode::Recursive)?;
 
-    eprintln!(
-        "🏃 Watching {} for changes...",
-        &args
-            .path
-            .to_str()
-            .ok_or(anyhow!("unable to retrive path"))?
-            .yellow()
-    );
-    eprintln!();
+    let mut run_number = 1;
 
-    let (build_duration, run_duration) = run(&file_type, &args).await?;
+    loop {
+        select! {
+            res = rx.recv() => {
+                let event = res.ok_or(anyhow!("Failed to receive event"))??;
+                let kind = event.kind;
 
-    let elapsed = run_duration + build_duration;
-    let time_taken = format!("{:?}", elapsed).dimmed();
+                match kind {
+                    EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(DataChange::Content)) => {
+                        clear_screen();
 
-    eprintln!();
-    eprintln!(
-        "🏁 Run taken: {} [{:?} build, {:?} run]",
-        time_taken, build_duration, run_duration
-    );
+                        if run_number > 1 {
+                            eprintln!("Lap! 🏃");
+                            eprintln!();
+                        } else {
+                            eprintln!(
+                                "🏃 Watching {} for changes...",
+                                &path
+                                    .to_str()
+                                    .ok_or(anyhow!("unable to retrive path"))?
+                                    .yellow()
+                            );
+                            eprintln!();
+                        }
 
-    last_run_duration = elapsed;
 
-    for res in rx {
-        let event = &res?;
-        let kind = event.kind;
+                        let (build_duration, run_duration) =
+                        run(&file_type, args.command.clone(), args.env.clone(), &path).await?;
 
-        // measure the time taken to reload the file
-        if let EventKind::Modify(ModifyKind::Data(DataChange::Content)) = kind {
-            clear_screen();
+                        let elapsed = run_duration + build_duration;
+                        let time_taken = format!("{:?}", elapsed).dimmed();
 
-            eprintln!("Lap! 🏃");
-            eprintln!();
+                        eprintln!();
+                        eprintln!(
+                            "🏁 Run taken: {} [{:?} build, {:?} run]",
+                            time_taken, build_duration, run_duration
+                        );
 
-            let (build_duration, run_duration) = run(&file_type, &args).await?;
+                        let delta = if last_run_duration.gt(&elapsed) {
+                            last_run_duration - elapsed
+                        } else {
+                            elapsed - last_run_duration
+                        };
 
-            let elapsed = run_duration + build_duration;
-            let time_taken = format!("{:?}", elapsed).dimmed();
+                        let deltastring = if last_run_duration.lt(&elapsed) && !delta.is_zero() {
+                            format!("+{:?}", delta).red()
+                        } else {
+                            format!("-{:?}", delta).green()
+                        };
 
-            eprintln!();
-            eprintln!(
-                "🏁 Run taken: {} [{:?} build, {:?} run]",
-                time_taken, build_duration, run_duration
-            );
+                        eprintln!("⏱️ Delta: {}", deltastring);
 
-            let delta = if last_run_duration.gt(&elapsed) {
-                last_run_duration - elapsed
-            } else {
-                elapsed - last_run_duration
-            };
+                        last_run_duration = elapsed;
+                        run_number += 1;
+                    }
+                    _ => {}
+                }
+            }
 
-            let deltastring = if last_run_duration.lt(&elapsed) && !delta.is_zero() {
-                format!("+{:?}", delta).red()
-            } else {
-                format!("-{:?}", delta).green()
-            };
+            _ = tokio::signal::ctrl_c() => {
+                println!("🧼 Cleaning up...");
 
-            eprintln!("⏱️ Delta: {}", deltastring);
+                if is_temp {
+                    tokio::fs::remove_file(&path).await?;
+                }
 
-            last_run_duration = elapsed;
+                break;
+            }
         }
     }
 
@@ -204,10 +233,13 @@ impl FileType {
     }
 }
 
-async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Duration)> {
-    let start = std::time::Instant::now();
-    let passed_env: Vec<(String, String)> = args
-        .env
+async fn run(
+    file_type: &FileType,
+    command: Option<String>,
+    env: Option<Vec<String>>,
+    path: &PathBuf,
+) -> anyhow::Result<(Duration, Duration)> {
+    let passed_env: Vec<(String, String)> = env
         .clone()
         .unwrap_or_default()
         .iter()
@@ -220,7 +252,7 @@ async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Dur
         })
         .collect();
 
-    match args.command.clone() {
+    match command.clone() {
         Some(c) => {
             let run_start = std::time::Instant::now();
 
@@ -231,7 +263,7 @@ async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Dur
                 command
                     .envs(passed_env.iter().cloned())
                     .args(parts)
-                    .arg(&args.path)
+                    .arg(path)
                     .spawn()?
                     .wait()
                     .await?;
@@ -239,13 +271,13 @@ async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Dur
                 let mut command = Command::new(c);
                 command
                     .envs(passed_env.iter().cloned())
-                    .arg(&args.path)
+                    .arg(path)
                     .spawn()?
                     .wait()
                     .await?;
             }
 
-            return Ok((DURATION_ZERO, run_start.elapsed()));
+            Ok((DURATION_ZERO, run_start.elapsed()))
         }
         None => {
             if !file_type.is_available().await? {
@@ -256,12 +288,12 @@ async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Dur
             }
 
             if matches!(file_type, FileType::Rust) {
-                let stem = args.path.file_stem().unwrap().to_str().unwrap();
+                let stem = path.file_stem().unwrap().to_str().unwrap();
 
                 let build_start = std::time::Instant::now();
                 Command::new(file_type.get_command_name().await?)
                     .envs(passed_env.iter().cloned())
-                    .arg(&args.path)
+                    .arg(path)
                     .arg("-o")
                     .arg(&format!("/tmp/{}-runner-build", stem))
                     .spawn()?
@@ -297,7 +329,7 @@ async fn run(file_type: &FileType, args: &Args) -> anyhow::Result<(Duration, Dur
             command
                 .envs(passed_env.iter().cloned())
                 .args(arguments)
-                .arg(&args.path)
+                .arg(path)
                 .spawn()?
                 .wait()
                 .await?;
