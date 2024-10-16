@@ -13,4 +13,5 @@ notify = { version = "6.1.1", features = ["serde"] }
 serde = { version = "1.0.198", features = ["derive"] }
 shellexpand = "3.1.0"
 strum = { version = "0.26.2", features = ["derive"] }
+thiserror = "1.0.64"
 tokio = { version = "1.37.0", features = ["full"] }
