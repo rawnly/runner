@@ -9,9 +9,12 @@ edition = "2021"
 anyhow = "1.0.82"
 clap = { version = "4.5.4", features = ["derive"] }
 colored = "2.1.0"
+inquire = "0.7.5"
 notify = { version = "6.1.1", features = ["serde"] }
 serde = { version = "1.0.198", features = ["derive"] }
 shellexpand = "3.1.0"
+spinners = "4.1.1"
 strum = { version = "0.26.2", features = ["derive"] }
+termion = "4.0.3"
 thiserror = "1.0.64"
 tokio = { version = "1.37.0", features = ["full"] }

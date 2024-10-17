@@ -5,6 +5,11 @@ mod file_type;
 mod templates;
 mod utils;
 
+use std::io::{stdin, stdout, Write};
+use termion::event::Key;
+use termion::input::TermRead;
+use termion::raw::IntoRawMode;
+
 use crate::{
     cli::Args,
     core::{run, DURATION_ZERO},
@@ -46,7 +51,33 @@ async fn main() -> anyhow::Result<()> {
 
     watcher.watch(&path, RecursiveMode::Recursive)?;
 
-    let mut run_number = 1;
+    clear_screen();
+    eprintln!(
+        "🏃 Watching {} for changes...",
+        &path
+            .to_str()
+            .ok_or(anyhow!("unable to retrive path"))?
+            .yellow()
+    );
+    eprintln!();
+
+    // tokio::spawn(async move {
+    //     loop {
+    //
+    //         // on keyboard `Enter`, refresh
+    //         for c in stdin.keys() {
+    //             clear_screen();
+    //
+    //             match c.unwrap() {
+    //                 Key::Esc => {
+    //                     eprintln!("exc pressed");
+    //                     break;
+    //                 }
+    //                 _ => break,
+    //             }
+    //         }
+    //     }
+    // });
 
     loop {
         select! {
@@ -58,25 +89,24 @@ async fn main() -> anyhow::Result<()> {
                     EventKind::Create(_) | EventKind::Modify(ModifyKind::Data(DataChange::Content)) => {
                         clear_screen();
 
-                        if run_number > 1 {
-                            eprintln!("(x{run_number}) Lap! 🏃");
-                            eprintln!();
-                            run_number += 1;
-                        } else {
-                            eprintln!(
-                                "🏃 Watching {} for changes...",
-                                &path
-                                    .to_str()
-                                    .ok_or(anyhow!("unable to retrive path"))?
-                                    .yellow()
-                            );
-                            eprintln!();
-                            run_number += 1;
-                        }
+                        eprintln!("🏃File Changed!");
+                        eprintln!();
 
 
-                        let (build_duration, run_duration) =
-                        run(&file_type, args.no_docker, args.command.clone(), args.env.clone(), &path).await?;
+                        let image = args.image.clone().map(|i| i.parse().unwrap());
+
+                        let (
+                            build_duration,
+                            run_duration,
+                            docker_image
+                        ) = run(
+                            &file_type,
+                            args.no_docker,
+                            args.command.clone(),
+                            args.env.clone(),
+                            &path,
+                            image
+                        ).await?;
 
                         let elapsed = run_duration + build_duration;
                         let time_taken = format!("{:?}", elapsed).dimmed();
@@ -100,6 +130,18 @@ async fn main() -> anyhow::Result<()> {
                         };
 
                         eprintln!("⏱️ Delta: {}", deltastring);
+
+                        if let Some(image) = docker_image {
+                            eprintln!("📦 Image: {}", image);
+                        }
+
+                        eprintln!(
+                            "🏃 Watching {} for changes...",
+                            &path
+                                .to_str()
+                                .ok_or(anyhow!("unable to retrive path"))?
+                                .yellow()
+                        );
 
                         last_run_duration = elapsed;
                     }

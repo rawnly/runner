@@ -1,13 +1,23 @@
-use std::process::ExitStatus;
+use std::{process::ExitStatus, str::FromStr};
 
-use crate::{file_type::FileType, spawn_command};
+use crate::{command, file_type::FileType, spawn_command};
 
 #[derive(Debug, thiserror::Error)]
 pub enum DockerError {
-    #[error("Unsupported docker runtime")]
+    #[error("Unsupported docker runtime: {0}")]
     UnsupportedRuntime(String),
+
+    #[error("Docker image does not exist: {0}")]
+    ImageDoesNotExist(String),
+
+    #[error("Docker image not installed: {0}")]
+    ImageNotInstalled(String),
+
+    #[error("Docker command failed: {0}")]
+    CommandFailed(#[from] std::io::Error),
 }
 
+#[derive(Debug, Clone)]
 pub struct DockerImage {
     image: String,
     tag: Option<String>,
@@ -36,6 +46,24 @@ impl DockerImage {
     pub fn latest(image: &str) -> Self {
         Self::new(image, "latest")
     }
+
+    async fn is_availble(&self) -> std::result::Result<bool, DockerError> {
+        image_exists_on_machine(&self.get_image()).await
+    }
+}
+
+impl FromStr for DockerImage {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split(':').collect();
+
+        if parts.len() == 1 {
+            Ok(Self::new(parts[0], "latest"))
+        } else {
+            Ok(Self::new(parts[0], parts[1]))
+        }
+    }
 }
 
 impl ToString for DockerImage {
@@ -44,280 +72,57 @@ impl ToString for DockerImage {
     }
 }
 
+pub async fn pull(image: &str) -> std::result::Result<std::process::Output, DockerError> {
+    Ok(command!("docker", "pull", image).output().await?)
+}
+
 pub async fn run(
     ft: &FileType,
     filepath: &str,
-    _: Vec<(String, String)>,
-) -> anyhow::Result<ExitStatus> {
-    let image = ft
-        .get_docker_image()
-        .ok_or(DockerError::UnsupportedRuntime(ft.to_string()))?
-        .to_string();
+    docker_command: Option<String>,
+    docker_image: Option<DockerImage>,
+) -> std::result::Result<(ExitStatus, String), DockerError> {
+    let image = docker_image
+        .or(ft.get_docker_image())
+        .ok_or(DockerError::UnsupportedRuntime(ft.to_string()))?;
+
+    if !image.is_availble().await? {
+        // ask the user if they want to pull the image
+        return Err(DockerError::ImageNotInstalled(image.to_string()));
+    }
 
     let entrypoint = ft
         .get_docker_entrypoint()
         .ok_or(DockerError::UnsupportedRuntime(ft.to_string()))?;
 
-    let volume = format!("{filepath}:/root/app/{entrypoint}");
-    let command = ft
-        .get_docker_command()
+    let mut fp = filepath.to_string();
+    if !filepath.starts_with("./") {
+        fp = format!("./{}", filepath);
+    }
+
+    let volume = format!("{fp}:/root/app/{entrypoint}");
+    let command = docker_command
+        .map(|c| {
+            c.to_string()
+                .replace("{entrypoint}", &format!("/root/app/{entrypoint}"))
+        })
+        .or(ft.get_docker_command())
         .ok_or(DockerError::UnsupportedRuntime(ft.to_string()))?;
 
-    let exit_status = spawn_command!("docker", "run", "-v", &volume, "-it", &image, &command)?
-        .wait()
-        .await?;
+    let image = image.to_string();
 
-    Ok(exit_status)
+    let exit_status =
+        spawn_command!("docker", "run", "-v", &volume, "-it", &image, "sh", "-c", &command)?
+            .wait()
+            .await?;
 
-    // match ft {
-    //     FileType::Node => node(filepath).await,
-    //     FileType::Rust => rust(filepath).await,
-    //     FileType::Python => python(filepath).await,
-    //     FileType::Ruby => ruby(filepath).await,
-    //     FileType::Go => go(filepath).await,
-    //     FileType::Php => php(filepath).await,
-    //     FileType::Perl => perl(filepath).await,
-    //     FileType::Shell => bash(filepath).await,
-    //     FileType::C => c(filepath).await,
-    //     FileType::Cpp => cpp(filepath).await,
-    //     FileType::Java => java(filepath).await,
-    //     FileType::CSharp => csharp(filepath).await,
-    //     _ => Err(anyhow::anyhow!(DockerError::UnsupportedRuntime(
-    //         ft.to_string()
-    //     ))),
-    // }
+    Ok((exit_status, image))
 }
 
-// pub async fn node(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.js");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "node:alpine",
-//         "node",
-//         "/root/app/file.js"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn rust(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/main.rs");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "rust:alpine",
-//         "sh",
-//         "-c",
-//         "rustc /root/app/main.rs && /root/app/main"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn python(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.py");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "python:alpine",
-//         "python",
-//         "/root/app/file.py"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn ruby(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.rb");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "ruby:alpine",
-//         "ruby",
-//         "/root/app/file.rb"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn go(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/main.go");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "golang:alpine",
-//         "go",
-//         "run",
-//         "/root/app/main.go"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn php(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.php");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "php:alpine",
-//         "php",
-//         "/root/app/file.php"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn perl(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.pl");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "perl",
-//         "perl",
-//         "/root/app/file.pl"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn bash(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/file.sh");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "bash:alpine",
-//         "sh",
-//         "/root/app/file.sh"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn c(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/main.c");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "gcc:alpine",
-//         "sh",
-//         "-c",
-//         "gcc /root/app/main.c -o /root/app/main && /root/app/main"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn cpp(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/main.cpp");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "gcc:alpine",
-//         "sh",
-//         "-c",
-//         "g++ /root/app/main.cpp -o /root/app/main && /root/app/main"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn java(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/Main.java");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "openjdk:alpine",
-//         "sh",
-//         "-c",
-//         "javac /root/app/Main.java && java -cp /root/app Main"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
-//
-// pub async fn csharp(filepath: &str) -> anyhow::Result<()> {
-//     let volume = format!("{filepath}:/root/app/Program.cs");
-//
-//     spawn_command!(
-//         "docker",
-//         "run",
-//         "-v",
-//         &volume,
-//         "-it",
-//         "mcr.microsoft.com/dotnet/core/sdk:alpine",
-//         "sh",
-//         "-c",
-//         "dotnet run --project /root/app"
-//     )?
-//     .wait()
-//     .await?;
-//
-//     Ok(())
-// }
+pub async fn image_exists_on_machine(image: &str) -> std::result::Result<bool, DockerError> {
+    let output = command!("docker", "image", "inspect", image)
+        .output()
+        .await?;
+
+    Ok(output.status.success())
+}

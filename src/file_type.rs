@@ -33,6 +33,7 @@ impl FileType {
             Self::Php => Some(DockerImage::alpine("php")),
             Self::Perl => Some(DockerImage::latest("perl")),
             Self::Java => Some(DockerImage::alpine("openjdk")),
+            Self::Rust => Some(DockerImage::alpine("rust")),
             _ => None,
         }
     }
@@ -43,7 +44,7 @@ impl FileType {
         if let Some(entrypoint) = entrypoint {
             return match self {
                 Self::Java => Some(format!(
-                    "java /root/app/{entrypoint} && java -cp /root/app Main"
+                    "javac /root/app/{entrypoint} && java -cp /root/app Main"
                 )),
                 Self::Node => Some(format!("node /root/app/{entrypoint}")),
                 Self::Python | Self::Python3 => Some(format!("python3 /root/app/{entrypoint}")),
@@ -51,7 +52,9 @@ impl FileType {
                 Self::Typescript => Some(format!(
                     "tsc /root/app/{entrypoint} && node /root/app/main.js"
                 )),
-                Self::Rust => Some(format!("rustc /root/app/{entrypoint} && /root/app/main")),
+                Self::Rust => Some(format!(
+                    "rustc /root/app/{entrypoint} -o /root/app/main && /root/app/main"
+                )),
                 Self::Shell => Some(format!("bash /root/app/{entrypoint}")),
                 Self::Ruby => Some(format!("ruby /root/app/{entrypoint}")),
                 Self::Php => Some(format!("php /root/app/{entrypoint}")),
@@ -61,9 +64,6 @@ impl FileType {
                 )),
                 Self::Cpp => Some(format!(
                     "g++ /root/app/{entrypoint} -o /root/app/main && /root/app/main"
-                )),
-                Self::CSharp => Some(format!(
-                    "csc /root/app/{entrypoint} && mono /root/app/main.exe"
                 )),
                 _ => None,
             };

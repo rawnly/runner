@@ -14,7 +14,12 @@ pub struct Args {
 
     /// command to run when the file changes -
     /// if includes whitespace, it will be split and the first part will be the command
+    /// when using docker you can use {entrypoint} to refer to the executable
+    #[clap(long)]
     pub command: Option<String>,
+
+    #[clap(long)]
+    pub image: Option<String>,
 
     /// environment variables to pass to the command
     /// e.g. `--env "KEY=VALUE"`
