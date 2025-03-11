@@ -96,7 +96,7 @@ pub async fn run(
         .ok_or(DockerError::UnsupportedRuntime(ft.to_string()))?;
 
     let mut fp = filepath.to_string();
-    if !filepath.starts_with("./") {
+    if !filepath.starts_with("./") && !filepath.starts_with("/") {
         fp = format!("./{}", filepath);
     }
 
